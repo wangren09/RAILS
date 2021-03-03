@@ -8,12 +8,12 @@
 RAILS is a computational method to boost robustness of prototype robust DNNs. RAILS uses an Adaptive Immune System Emulator (AISE) for robustness.
 
 ### HOWTO
-Run rails_cifar.ipynb, rails_mnist.ipynb, associate files include MAMLMeta.py, aise.py, pgd.py
+Run rails_cifar.ipynb, rails_mnist.ipynb, associate files include aise.py, pgd.py
 
 ### Commercial Application
 RAILS has been filed as a patent. No commercial usage is allowed.
 
-## Refer to this Rep.
+## Refer to this Repo.
 If you use this code, please cite the following reference
 
 ```
