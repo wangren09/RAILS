@@ -29,8 +29,8 @@ class PGD:
             loss = self.loss_fn(pred_adv, targets)
         else:
             loss = self.loss_fn(pred_adv, y)
-        loss.backward()
-        pert = self.step * x_adv.grad.sign()
+        grad = torch.autograd.grad(loss, x_adv)[0]
+        pert = self.step * grad.sign()
         x_adv = (x_adv + pert).clamp(0.0, 1.0).detach()
         pert = (x_adv - x).clamp(-self.eps, self.eps)
         return x + pert
