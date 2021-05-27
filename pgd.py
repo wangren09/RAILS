@@ -16,7 +16,7 @@ class PGD:
     def attack(self, model, x, y, x_adv=None, targets=None):
         if x_adv is None:
             if self.random_init:
-                x_adv = self.step * torch.randn_like(x) + x
+                x_adv = 2 * self.eps * (torch.rand_like(x)-0.5) + x
                 x_adv = x_adv.clamp(0.0, 1.0)
             else:
                 x_adv = torch.clone(x).detach()
