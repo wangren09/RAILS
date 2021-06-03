@@ -92,14 +92,15 @@ class AISE:
             max_generation=10,
             requires_init=True,
             mut_range=(.05, .15),
-            mut_prob=(.05, .15),
+            mut_prob=(.005, .015),
             genop_type="crossover",
             decay=(.9, .9),
             n_population=1000,
             memory_threshold=.25,
             plasma_threshold=.05,
             keep_memory=False,
-            return_log=False
+            return_log=False,
+            return_bcells=False
     ):
 
         self.model = model
@@ -133,7 +134,6 @@ class AISE:
             self.cliprg = 1
 
         self.max_generation = max_generation
-        self.n_population = self.n_class * self.n_neighbors
         self.requires_init = requires_init
 
         self.mut_range = mut_range
@@ -152,7 +152,9 @@ class AISE:
 
         self.keep_memory = keep_memory
         self.return_log = return_log
-
+    
+        self.return_bcells = return_bcells
+    
         try:
             self.model.to(self.device)
             self.model.eval()
@@ -255,6 +257,10 @@ class AISE:
         else:
             ant_logs = None
 
+        head_shape = (self.n_class, self.n_population // self.n_class)
+        # static index
+        static_index = torch.arange(self.n_population).reshape(head_shape).to(self.device)
+        
         for n in range(ant.size(0)):
             genop = GeneticOperator(self.mut_range[1], self.mut_prob[1], self.cliprg, type=self.genop_type)
             curr_gen = torch.Tensor(self.x_orig[nbc_ind[n]]).to(self.device)  # naive b cells
@@ -265,10 +271,10 @@ class AISE:
                 curr_gen = curr_gen.repeat_interleave(self.n_population // (self.n_class * self.n_neighbors), dim=0)
                 curr_gen = genop.mutate(curr_gen, self.cliprg)  # initialize *NOTE: torch.Tensor.repeat <> numpy.repeat
                 labels = labels.repeat_interleave(self.n_population // (self.n_class * self.n_neighbors))
-            head_shape = (self.n_class, self.n_population // self.n_class)
             curr_repr = self._hidden_repr_mapping(curr_gen).reshape(head_shape+(-1,))
             fitness_score = self.fitness_func(ant_tran[n].to(self.device), curr_repr.to(self.device))
-
+            _, fitness_rank = torch.sort(fitness_score.flatten().cpu())
+            
             best_pop_fitness = float('-inf')
             decay_coef = (1., 1.)
             num_plateau = 0
@@ -276,15 +282,22 @@ class AISE:
             # zeroth generation logging
             if self.return_log:
                 fitness_pop_hist = []
-                pop_fitness = fitness_score.sum().item()
+                proba_true_class_hist = []
+                sum_fitness_true_class_hist = []
+                pop_fitness = torch.exp(fitness_score).sum().item()
                 fitness_pop_hist.append(pop_fitness)
                 if y_ant is not None:
                     fitness_true_class_hist = []
-                    true_class_fitness = fitness_score[y_ant[n]].sum().item()
+#                     true_class_fitness = fitness_score[y_ant[n]].sum().item()
+                    true_class_fitness = (torch.exp(fitness_score.flatten())*(labels==y_ant[n]))[fitness_rank[-self.n_plasma:]].sum().item()
+                    true_class_total = (labels[fitness_rank[-self.n_plasma:]]==y_ant[n]).sum().item()
+                    if true_class_total == 0:
+                        true_class_fitness = float("-Inf")
+                    else:
+                        true_class_fitness /= true_class_total
+                    sum_fitness_true_class_hist.append(torch.exp(fitness_score[y_ant[n]]).sum().item())
                     fitness_true_class_hist.append(true_class_fitness)
-
-            # static index
-            static_index = torch.arange(self.n_population).reshape(head_shape).to(self.device)
+                    proba_true_class_hist.append(true_class_total/self.n_plasma)
 
             for i in range(self.max_generation):
                 survival_prob = F.softmax(fitness_score / self.sampl_temp, dim=-1)
@@ -308,14 +321,23 @@ class AISE:
                 curr_repr = self._hidden_repr_mapping(curr_gen).reshape(head_shape + (-1,))
 
                 fitness_score = self.fitness_func(ant_tran[n].to(self.device), curr_repr.to(self.device))
+                _, fitness_rank = torch.sort(fitness_score.flatten().cpu())
                 pop_fitness = fitness_score.sum().item()
 
                 if self.return_log:
                     # logging
                     fitness_pop_hist.append(pop_fitness)
                     if y_ant is not None:
-                        true_class_fitness = fitness_score[y_ant[n]].sum().item()
+#                         true_class_fitness = fitness_score[y_ant[n]].sum().item()
+                        true_class_fitness = (torch.exp(fitness_score.flatten())*(labels==y_ant[n]))[fitness_rank[-self.n_plasma:]].sum().item()
+                        true_class_total = (labels[fitness_rank[-self.n_plasma:]]==y_ant[n]).sum().item()
+                        if true_class_total == 0:
+                            true_class_fitness = float("-Inf")
+                        else:
+                            true_class_fitness /= true_class_total
+                        sum_fitness_true_class_hist.append(torch.exp(fitness_score[y_ant[n]]).sum().item())
                         fitness_true_class_hist.append(true_class_fitness)
+                        proba_true_class_hist.append(true_class_total/self.n_plasma)
 
                 # adaptive shrinkage of certain hyper-parameters
                 if self.decay:
@@ -340,19 +362,24 @@ class AISE:
             if self.return_log:
                 ant_log["fitness_pop"] = fitness_pop_hist
                 if y_ant is not None:
+                    ant_log["sum_fitness_true_class"] = sum_fitness_true_class_hist
                     ant_log["fitness_true_class"] = fitness_true_class_hist
-            pla_bcs.append(curr_gen[fitness_rank[-self.n_plasma:]].detach().cpu())
+                    ant_log["proba_true_class"] = proba_true_class_hist
+            if self.return_bcells:
+                pla_bcs.append(curr_gen[fitness_rank[-self.n_plasma:]].detach().cpu())
             pla_labs.append(labels[fitness_rank[-self.n_plasma:]].cpu().numpy())
             if self.keep_memory:
-                mem_bcs.append(curr_gen[fitness_rank[-(self.n_memory + self.n_plasma):-self.n_plasma]].detach().cpu())
+                if self.return_bcells:
+                    mem_bcs.append(curr_gen[fitness_rank[-(self.n_memory + self.n_plasma):-self.n_plasma]].detach().cpu())
                 mem_labs.append(labels[fitness_rank[-(self.n_memory + self.n_plasma):-self.n_plasma]].cpu().numpy())
             if self.return_log:
                 ant_logs.append(ant_log)
-
-        pla_bcs = torch.stack(pla_bcs).view((-1, self.n_plasma) + self.input_shape).numpy()
+        if self.return_bcells:
+            pla_bcs = torch.stack(pla_bcs).view((-1, self.n_plasma) + self.input_shape).numpy()
         pla_labs = np.stack(pla_labs).astype(np.int)
         if self.keep_memory:
-            mem_bcs = torch.stack(mem_bcs).view((-1, self.n_mem) + self.input_shape).numpy()
+            if self.return_bcells:
+                mem_bcs = torch.stack(mem_bcs).view((-1, self.n_mem) + self.input_shape).numpy()
             mem_labs = np.stack(mem_labs).astype(np.int)
 
         return mem_bcs, mem_labs, pla_bcs, pla_labs, ant_logs
@@ -368,10 +395,10 @@ class AISE:
             y_ant
         )
         if self.keep_memory:
-            logger.info("{} plasma B cells and {} memory generated!".format(pla_bcs.shape[0] * self.n_plasma,
-                                                                            mem_bcs.shape[0] * self.n_memory))
+            logger.info("{} plasma B cells and {} memory generated!".format(pla_labs.shape[0] * self.n_plasma,
+                                                                            mem_labs.shape[0] * self.n_memory))
         else:
-            logger.info("{} plasma B cells generated!".format(pla_bcs.shape[0] * self.n_plasma))
+            logger.info("{} plasma B cells generated!".format(pla_labs.shape[0] * self.n_plasma))
         return mem_bcs, mem_labs, pla_bcs, pla_labs, ant_logs
 
     def __call__(self, ant):
